@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Settings — Tweet Engine</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <nav class="sidebar" id="sidebar"></nav>
+
+  <main class="main">
+    <div class="page-title">Settings</div>
+
+    <div style="max-width:560px;display:flex;flex-direction:column;gap:20px">
+
+      <!-- ── API Keys ── -->
+      <div class="card">
+        <div class="section-title" style="margin-bottom:16px">API Keys</div>
+
+        <div class="form-group">
+          <label class="form-label">OpenAI API Key</label>
+          <div style="display:flex;gap:8px">
+            <input class="form-control" id="openai-key" type="password"
+              placeholder="sk-…" style="flex:1" />
+            <button class="btn btn-outline btn-sm" id="toggle-key-btn"
+              onclick="toggleKeyVisibility()" type="button">Show</button>
+          </div>
+          <div class="form-hint">Stored in .env file (local dev only). On Railway, set via environment variables.</div>
+        </div>
+
+        <div id="key-status" style="font-size:12px;margin-bottom:12px"></div>
+
+        <button class="btn btn-primary" id="save-key-btn">Save Key</button>
+      </div>
+
+      <!-- ── Scheduler ── -->
+      <div class="card">
+        <div class="section-title" style="margin-bottom:16px">Scheduler</div>
+
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--border)">
+          <div>
+            <div style="font-weight:600;font-size:14px">Post Frequency</div>
+            <div style="font-size:12px;color:var(--gray);margin-top:2px">Queue is processed automatically</div>
+          </div>
+          <span class="badge badge-posted">Every 60 min</span>
+        </div>
+
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 0">
+          <div>
+            <div style="font-weight:600;font-size:14px">Manual Trigger</div>
+            <div style="font-size:12px;color:var(--gray);margin-top:2px">Process all due tweets right now</div>
+          </div>
+          <button class="btn btn-amber" id="run-now-btn">Run Queue Now</button>
+        </div>
+
+        <div id="run-result" style="display:none" class="alert alert-info"></div>
+      </div>
+
+      <!-- ── About ── -->
+      <div class="card">
+        <div class="section-title" style="margin-bottom:16px">About</div>
+        <table style="font-size:13px">
+          <tr>
+            <td style="padding:8px 0;color:var(--gray);width:140px;border:none">Version</td>
+            <td style="padding:8px 0;border:none;font-weight:500">0.1.0</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;color:var(--gray);border:none">Backend</td>
+            <td style="padding:8px 0;border:none;font-weight:500">FastAPI + SQLite</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;color:var(--gray);border:none">AI</td>
+            <td style="padding:8px 0;border:none;font-weight:500">OpenAI GPT-4o</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;color:var(--gray);border:none">Scheduler</td>
+            <td style="padding:8px 0;border:none;font-weight:500">APScheduler</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;color:var(--gray);border:none">Posting</td>
+            <td style="padding:8px 0;border:none;font-weight:500">Tweepy v4</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;color:var(--gray);border:none">Hosting</td>
+            <td style="padding:8px 0;border:none;font-weight:500">Railway</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;color:var(--gray);border:none">API Status</td>
+            <td style="padding:8px 0;border:none" id="api-status">Checking…</td>
+          </tr>
+        </table>
+      </div>
+
+    </div>
+  </main>
+
+  <script src="nav.js"></script>
+  <script>
+    // ── API key ────────────────────────────────────────────────────────────
+
+    async function loadKeyStatus() {
+      const el = document.getElementById('key-status');
+      try {
+        const res = await api('GET', '/settings/openai-key');
+        if (res.set) {
+          el.innerHTML = `<span style="color:var(--green)">✓ Key is set (${res.masked})</span>`;
+        } else {
+          el.innerHTML = `<span style="color:var(--amber)">⚠ No key configured</span>`;
+        }
+      } catch { /* endpoint may not exist yet */ }
+    }
+
+    function toggleKeyVisibility() {
+      const input = document.getElementById('openai-key');
+      const btn   = document.getElementById('toggle-key-btn');
+      if (input.type === 'password') {
+        input.type = 'text';
+        btn.textContent = 'Hide';
+      } else {
+        input.type = 'password';
+        btn.textContent = 'Show';
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      loadKeyStatus();
+
+      document.getElementById('save-key-btn').addEventListener('click', async () => {
+        const key = document.getElementById('openai-key').value.trim();
+        if (!key) { toast('Enter an API key', 'error'); return; }
+
+        const btn = document.getElementById('save-key-btn');
+        const restore = btnLoading(btn, 'Saving…');
+        try {
+          await api('POST', '/settings/openai-key', { key });
+          toast('API key saved', 'success');
+          document.getElementById('openai-key').value = '';
+          loadKeyStatus();
+        } catch (e) {
+          toast(e.message, 'error');
+        } finally {
+          restore();
+        }
+      });
+
+      // ── Run queue now ────────────────────────────────────────────────────
+
+      document.getElementById('run-now-btn').addEventListener('click', async () => {
+        const btn = document.getElementById('run-now-btn');
+        const resultBox = document.getElementById('run-result');
+        const restore = btnLoading(btn, 'Processing…');
+        resultBox.style.display = 'none';
+
+        try {
+          const res = await api('POST', '/queue/process-now');
+          resultBox.className = 'alert alert-info';
+          resultBox.textContent =
+            `Done — ${res.processed} processed, ${res.succeeded} posted, ${res.failed} failed.`;
+          resultBox.style.display = 'block';
+          toast(`Queue processed: ${res.succeeded} posted`, 'success');
+        } catch (e) {
+          resultBox.className = 'alert alert-error';
+          resultBox.textContent = e.message;
+          resultBox.style.display = 'block';
+        } finally {
+          restore();
+        }
+      });
+
+      // ── API status ping ──────────────────────────────────────────────────
+
+      api('GET', '/').then(res => {
+        document.getElementById('api-status').innerHTML =
+          `<span style="color:var(--green)">✓ ${res.status}</span>`;
+      }).catch(() => {
+        document.getElementById('api-status').innerHTML =
+          `<span style="color:var(--red)">✗ Offline</span>`;
+      });
+    });
+  </script>
+</body>
+</html>

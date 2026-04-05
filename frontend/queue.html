@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Queue — Tweet Engine</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <nav class="sidebar" id="sidebar"></nav>
+
+  <main class="main">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px">
+      <div class="page-title" style="margin:0">Queue</div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-outline" id="refresh-btn">Refresh</button>
+        <button class="btn btn-amber" id="process-btn">Run Queue Now</button>
+      </div>
+    </div>
+
+    <!-- Filter pills -->
+    <div class="pill-group" id="filter-pills">
+      <button class="pill active" data-status="">All</button>
+      <button class="pill" data-status="pending">Pending</button>
+      <button class="pill" data-status="posted">Posted</button>
+      <button class="pill" data-status="failed">Failed</button>
+    </div>
+
+    <div class="card">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Scheduled</th>
+              <th>Account</th>
+              <th>Tone</th>
+              <th>Tweet</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="queue-tbody">
+            <tr><td colspan="6" class="empty-state">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+
+  <script src="nav.js"></script>
+  <script>
+    let currentStatus = '';
+
+    // ── Load queue ─────────────────────────────────────────────────────────
+
+    async function loadQueue() {
+      const tbody = document.getElementById('queue-tbody');
+      tbody.innerHTML = `<tr><td colspan="6" class="empty-state">Loading…</td></tr>`;
+
+      try {
+        const path = currentStatus ? `/queue?status=${currentStatus}` : '/queue';
+        const items = await api('GET', path);
+
+        if (!items.length) {
+          tbody.innerHTML = `<tr><td colspan="6" class="empty-state">No items${currentStatus ? ` with status "${currentStatus}"` : ''}.</td></tr>`;
+          return;
+        }
+
+        tbody.innerHTML = items.map(item => `
+          <tr>
+            <td style="white-space:nowrap;font-size:12px">${fmtDate(item.scheduled_at)}</td>
+            <td><strong>@${escHtml(item.username)}</strong></td>
+            <td>${toneBadge(item.tone)}</td>
+            <td><span class="truncate" title="${escHtml(item.tweet_text)}">${escHtml(item.tweet_text)}</span></td>
+            <td>${statusBadge(item.status)}</td>
+            <td>
+              ${item.status === 'pending' ? `
+                <button class="btn btn-danger btn-sm" onclick="deleteItem(${item.id}, this)">Delete</button>
+              ` : '—'}
+            </td>
+          </tr>
+        `).join('');
+      } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="6" class="empty-state" style="color:var(--red)">${e.message}</td></tr>`;
+      }
+    }
+
+    // ── Delete item ────────────────────────────────────────────────────────
+
+    async function deleteItem(id, btn) {
+      if (!confirm('Remove this tweet from the queue?')) return;
+      const restore = btnLoading(btn, '…');
+      try {
+        await api('DELETE', `/queue/${id}`);
+        toast('Removed from queue', 'success');
+        loadQueue();
+      } catch (e) {
+        toast(e.message, 'error');
+        restore();
+      }
+    }
+
+    // ── Filter pills ───────────────────────────────────────────────────────
+
+    document.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('filter-pills').addEventListener('click', e => {
+        const pill = e.target.closest('.pill');
+        if (!pill) return;
+        document.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
+        pill.classList.add('active');
+        currentStatus = pill.dataset.status;
+        loadQueue();
+      });
+
+      // Refresh
+      document.getElementById('refresh-btn').addEventListener('click', loadQueue);
+
+      // Run queue now
+      document.getElementById('process-btn').addEventListener('click', async () => {
+        const btn = document.getElementById('process-btn');
+        const restore = btnLoading(btn, 'Processing…');
+        try {
+          const res = await api('POST', '/queue/process-now');
+          toast(`Processed ${res.processed} — ${res.succeeded} posted, ${res.failed} failed`, 'success');
+          loadQueue();
+        } catch (e) {
+          toast(e.message, 'error');
+        } finally {
+          restore();
+        }
+      });
+
+      loadQueue();
+    });
+
+    function escHtml(str) {
+      return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+  </script>
+</body>
+</html>

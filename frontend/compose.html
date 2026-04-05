@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Compose — Tweet Engine</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <nav class="sidebar" id="sidebar"></nav>
+
+  <main class="main">
+    <div class="page-title">Compose</div>
+
+    <div class="grid-2" style="align-items:start">
+
+      <!-- ── Left: Input panel ── -->
+      <div>
+        <div class="section">
+          <div class="section-title" style="margin-bottom:14px">Topic</div>
+          <div class="card">
+            <div class="form-group">
+              <label class="form-label">Headline or topic</label>
+              <textarea class="form-control" id="headline" rows="4"
+                placeholder="Paste a news headline or topic you want to tweet about…"></textarea>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Video URL <span style="color:var(--gray);font-weight:400">(optional)</span></label>
+              <input class="form-control" id="video-url" type="url"
+                placeholder="https://youtube.com/…" />
+            </div>
+
+            <!-- Schedule time -->
+            <div class="form-group">
+              <label class="form-label">Schedule at</label>
+              <input class="form-control" id="schedule-at" type="datetime-local" />
+              <div class="form-hint">Leave blank to schedule 1 hour from now</div>
+            </div>
+
+            <!-- Account selector -->
+            <div class="form-group">
+              <label class="form-label">Post from</label>
+              <div class="check-group" id="account-checks">
+                <div style="color:var(--gray);font-size:13px">Loading accounts…</div>
+              </div>
+            </div>
+
+            <button class="btn btn-primary" id="generate-btn" style="width:100%">
+              Generate Variants
+            </button>
+          </div>
+        </div>
+
+        <!-- Recent topics for quick fill -->
+        <div class="section">
+          <div class="section-title" style="margin-bottom:12px">Recent Topics</div>
+          <div class="card" id="topics-list">
+            <div class="empty-state" style="padding:12px">Loading…</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Right: Generated variants ── -->
+      <div class="section" id="variants-panel" style="display:none">
+        <div class="section-header">
+          <span class="section-title">Generated Variants</span>
+          <button class="btn btn-success" id="schedule-all-btn">
+            Schedule All
+          </button>
+        </div>
+        <div class="variant-grid" id="variants-grid"></div>
+      </div>
+    </div>
+  </main>
+
+  <script src="nav.js"></script>
+  <script>
+    // ── State ─────────────────────────────────────────────────────────────
+
+    let accounts = [];   // all accounts from API
+    let variants = [];   // last generated variants
+
+    // ── Load accounts ─────────────────────────────────────────────────────
+
+    async function loadAccounts() {
+      const wrap = document.getElementById('account-checks');
+      try {
+        accounts = await api('GET', '/accounts');
+        const active = accounts.filter(a => a.is_active);
+
+        if (!active.length) {
+          wrap.innerHTML = `<div style="color:var(--gray);font-size:13px">No active accounts. <a href="accounts.html">Add one →</a></div>`;
+          return;
+        }
+
+        wrap.innerHTML = active.map(a => `
+          <label class="check-item">
+            <input type="checkbox" class="acc-check" value="${a.id}" data-tone="${a.tone}" checked />
+            <span class="check-item-label">
+              <strong>@${escHtml(a.username)}</strong>
+            </span>
+            ${toneBadge(a.tone)}
+          </label>
+        `).join('');
+      } catch (e) {
+        wrap.innerHTML = `<div style="color:var(--red);font-size:13px">Failed to load accounts</div>`;
+      }
+    }
+
+    // ── Load recent topics ─────────────────────────────────────────────────
+
+    async function loadTopics() {
+      const wrap = document.getElementById('topics-list');
+      try {
+        const topics = await api('GET', '/topics');
+        if (!topics.length) {
+          wrap.innerHTML = `<div class="empty-state" style="padding:12px">No topics yet.</div>`;
+          return;
+        }
+        wrap.innerHTML = topics.slice(0, 8).map(t => `
+          <div class="topic-row" onclick="fillHeadline(${JSON.stringify(t.headline)})">
+            <span class="topic-headline">${escHtml(t.headline)}</span>
+            <span class="topic-date">${relTime(t.created_at)}</span>
+          </div>
+        `).join('');
+      } catch (e) {
+        wrap.innerHTML = `<div class="empty-state" style="padding:12px;color:var(--red)">Failed to load topics</div>`;
+      }
+    }
+
+    function fillHeadline(headline) {
+      document.getElementById('headline').value = headline;
+      document.getElementById('headline').focus();
+    }
+
+    // ── Generate ──────────────────────────────────────────────────────────
+
+    document.addEventListener('DOMContentLoaded', () => {
+      // Pre-fill from dashboard quick-compose hand-off
+      const saved = sessionStorage.getItem('compose_headline');
+      if (saved) {
+        document.getElementById('headline').value = saved;
+        sessionStorage.removeItem('compose_headline');
+      }
+
+      // Default schedule time = now + 1 hour
+      const nextHour = new Date(Date.now() + 3600_000);
+      // datetime-local format: YYYY-MM-DDTHH:MM
+      const pad = n => String(n).padStart(2, '0');
+      document.getElementById('schedule-at').value =
+        `${nextHour.getFullYear()}-${pad(nextHour.getMonth()+1)}-${pad(nextHour.getDate())}T${pad(nextHour.getHours())}:${pad(nextHour.getMinutes())}`;
+
+      document.getElementById('generate-btn').addEventListener('click', handleGenerate);
+      document.getElementById('schedule-all-btn').addEventListener('click', handleScheduleAll);
+
+      loadAccounts();
+      loadTopics();
+    });
+
+    async function handleGenerate() {
+      const headline = document.getElementById('headline').value.trim();
+      const video    = document.getElementById('video-url').value.trim() || null;
+      if (!headline) { toast('Enter a headline first', 'error'); return; }
+
+      const btn = document.getElementById('generate-btn');
+      const restore = btnLoading(btn, 'Generating…');
+      try {
+        variants = await api('POST', '/generate', { headline, video_url: video });
+        renderVariants();
+        document.getElementById('variants-panel').style.display = '';
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        restore();
+      }
+    }
+
+    // ── Render variant cards ───────────────────────────────────────────────
+
+    function renderVariants() {
+      const grid = document.getElementById('variants-grid');
+      grid.innerHTML = variants.map((v, i) => `
+        <div class="variant-card">
+          <div class="variant-header">
+            ${toneBadge(v.tone)}
+            <button class="btn btn-outline btn-sm" onclick="scheduleOne(${i})">
+              Schedule this
+            </button>
+          </div>
+          <textarea class="form-control" id="var-text-${i}" rows="4"
+            style="font-size:13px;line-height:1.5"
+            oninput="updateCounter(${i})">${escHtml(v.text)}</textarea>
+          <div class="char-counter" id="counter-${i}"></div>
+        </div>
+      `).join('');
+
+      // Initialise counters
+      variants.forEach((_, i) => updateCounter(i));
+    }
+
+    function updateCounter(i) {
+      const ta  = document.getElementById(`var-text-${i}`);
+      const el  = document.getElementById(`counter-${i}`);
+      const len = ta.value.length;
+      el.textContent = `${len} / 240`;
+      el.className = `char-counter ${len > 220 ? (len > 240 ? 'over' : 'warn') : ''}`;
+      // Keep in-memory variant in sync
+      variants[i].text = ta.value;
+    }
+
+    // ── Scheduling helpers ─────────────────────────────────────────────────
+
+    function getSelectedAccounts() {
+      return [...document.querySelectorAll('.acc-check:checked')].map(c => ({
+        id: +c.value,
+        tone: c.dataset.tone,
+      }));
+    }
+
+    function getScheduledAt() {
+      const val = document.getElementById('schedule-at').value;
+      return val ? new Date(val).toISOString() : null;
+    }
+
+    async function scheduleOne(idx) {
+      const selected = getSelectedAccounts();
+      if (!selected.length) { toast('Select at least one account', 'error'); return; }
+
+      const text     = variants[idx].text;
+      const video    = document.getElementById('video-url').value.trim() || null;
+      const schedAt  = getScheduledAt();
+
+      try {
+        for (const acc of selected) {
+          await api('POST', '/queue', {
+            account_id:   acc.id,
+            tweet_text:   text,
+            video_url:    video,
+            scheduled_at: schedAt,
+          });
+        }
+        toast(`Queued for ${selected.length} account(s)`, 'success');
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+    }
+
+    async function handleScheduleAll() {
+      const selected = getSelectedAccounts();
+      if (!selected.length) { toast('Select at least one account', 'error'); return; }
+      if (!variants.length)  { toast('Generate variants first', 'error'); return; }
+
+      const video = document.getElementById('video-url').value.trim() || null;
+
+      // Match each variant to an account by tone; fall back to round-robin
+      const bulkVariants = variants.map((v, i) => {
+        const matched = selected.find(a => a.tone === v.tone) || selected[i % selected.length];
+        return { account_id: matched.id, text: v.text };
+      });
+
+      const btn = document.getElementById('schedule-all-btn');
+      const restore = btnLoading(btn, 'Scheduling…');
+      try {
+        const res = await api('POST', '/queue/bulk', { variants: bulkVariants, video_url: video });
+        toast(`${res.count} tweets queued`, 'success');
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        restore();
+      }
+    }
+
+    // ── Utility ────────────────────────────────────────────────────────────
+
+    function escHtml(str) {
+      return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+  </script>
+</body>
+</html>

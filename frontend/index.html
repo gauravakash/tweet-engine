@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dashboard — Tweet Engine</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <nav class="sidebar" id="sidebar"></nav>
+
+  <main class="main">
+    <div class="page-title">Dashboard</div>
+
+    <!-- ── Stats ── -->
+    <div class="stats-row" id="stats-row">
+      <div class="stat-card"><div class="stat-label">Posted Today</div><div class="stat-value" id="s-today">—</div></div>
+      <div class="stat-card"><div class="stat-label">In Queue</div><div class="stat-value" id="s-queue">—</div></div>
+      <div class="stat-card"><div class="stat-label">Active Accounts</div><div class="stat-value" id="s-accounts">—</div></div>
+      <div class="stat-card"><div class="stat-label">Success Rate</div><div class="stat-value" id="s-rate">—</div></div>
+    </div>
+
+    <div class="grid-2">
+      <!-- ── Left column ── -->
+      <div>
+        <!-- Active accounts strip -->
+        <div class="section">
+          <div class="section-header">
+            <span class="section-title">Connected Accounts</span>
+            <a href="accounts.html" class="btn btn-outline btn-sm">Manage</a>
+          </div>
+          <div class="card">
+            <div class="accounts-strip" id="accounts-strip">
+              <div class="empty-state" style="padding:16px">Loading…</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Recent topics -->
+        <div class="section">
+          <div class="section-header">
+            <span class="section-title">Recent Topics</span>
+            <a href="compose.html" class="btn btn-outline btn-sm">See all</a>
+          </div>
+          <div class="card" id="topics-card">
+            <div class="empty-state" style="padding:16px">Loading…</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Right column — Quick compose ── -->
+      <div class="section">
+        <div class="section-header">
+          <span class="section-title">Quick Compose</span>
+        </div>
+        <div class="card">
+          <div class="form-group">
+            <label class="form-label">Topic / Headline</label>
+            <textarea class="form-control" id="qc-headline" rows="3"
+              placeholder="Paste a headline or topic to generate tweets…"></textarea>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Video URL <span style="color:var(--gray);font-weight:400">(optional)</span></label>
+            <input class="form-control" id="qc-video" type="url"
+              placeholder="https://youtube.com/…" />
+          </div>
+          <button class="btn btn-primary" id="qc-btn" style="width:100%">
+            Generate Variants
+          </button>
+
+          <!-- Generated variants appear here -->
+          <div id="qc-variants" style="margin-top:16px"></div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script src="nav.js"></script>
+  <script>
+    // ── Stats ─────────────────────────────────────────────────────────────
+
+    async function loadStats() {
+      try {
+        const [history, queue, accounts] = await Promise.all([
+          api('GET', '/history?page=1'),
+          api('GET', '/queue?status=pending'),
+          api('GET', '/accounts'),
+        ]);
+
+        // Posted today: filter history where posted_at is today
+        const today = new Date().toDateString();
+        const todayPosts = history.filter(h =>
+          new Date(h.posted_at.endsWith('Z') ? h.posted_at : h.posted_at + 'Z').toDateString() === today
+        );
+
+        // Success rate from all history
+        const total   = history.length;
+        const posted  = history.filter(h => h.status === 'posted').length;
+        const rate    = total > 0 ? Math.round((posted / total) * 100) : 0;
+        const active  = accounts.filter(a => a.is_active === 1).length;
+
+        document.getElementById('s-today').textContent    = todayPosts.length;
+        document.getElementById('s-queue').textContent    = queue.length;
+        document.getElementById('s-accounts').textContent = active;
+        document.getElementById('s-rate').textContent     = total > 0 ? `${rate}%` : '—';
+      } catch (e) {
+        console.error('Stats error:', e);
+      }
+    }
+
+    // ── Accounts strip ─────────────────────────────────────────────────────
+
+    async function loadAccounts() {
+      const strip = document.getElementById('accounts-strip');
+      try {
+        const accounts = await api('GET', '/accounts');
+        if (!accounts.length) {
+          strip.innerHTML = `<div class="empty-state" style="padding:12px">No accounts yet. <a href="accounts.html">Add one →</a></div>`;
+          return;
+        }
+        strip.innerHTML = accounts.map(a => `
+          <div class="account-chip">
+            <span class="dot ${a.is_active ? 'dot-green' : 'dot-gray'}"></span>
+            <span style="font-weight:600">@${a.username}</span>
+            ${toneBadge(a.tone)}
+          </div>
+        `).join('');
+      } catch (e) {
+        strip.innerHTML = `<div class="empty-state" style="padding:12px;color:var(--red)">Failed to load accounts</div>`;
+      }
+    }
+
+    // ── Recent topics ──────────────────────────────────────────────────────
+
+    async function loadTopics() {
+      const card = document.getElementById('topics-card');
+      try {
+        const topics = await api('GET', '/topics');
+        const latest = topics.slice(0, 5);
+        if (!latest.length) {
+          card.innerHTML = `<div class="empty-state" style="padding:12px">No topics yet.</div>`;
+          return;
+        }
+        card.innerHTML = latest.map(t => `
+          <div class="topic-row" onclick="useTopicInCompose(${JSON.stringify(t.headline)})">
+            <span class="topic-headline">${escHtml(t.headline)}</span>
+            <span class="topic-date">${relTime(t.created_at)}</span>
+            <svg viewBox="0 0 16 16" fill="currentColor" width="12" style="color:var(--gray);flex-shrink:0">
+              <path d="M6 3l5 5-5 5"/>
+            </svg>
+          </div>
+        `).join('');
+      } catch (e) {
+        card.innerHTML = `<div class="empty-state" style="padding:12px;color:var(--red)">Failed to load topics</div>`;
+      }
+    }
+
+    function useTopicInCompose(headline) {
+      // Navigate to compose page with headline pre-filled via sessionStorage
+      sessionStorage.setItem('compose_headline', headline);
+      location.href = 'compose.html';
+    }
+
+    // ── Quick compose ──────────────────────────────────────────────────────
+
+    document.addEventListener('DOMContentLoaded', () => {
+      const btn = document.getElementById('qc-btn');
+
+      btn.addEventListener('click', async () => {
+        const headline = document.getElementById('qc-headline').value.trim();
+        const video    = document.getElementById('qc-video').value.trim() || null;
+        if (!headline) { toast('Enter a headline first', 'error'); return; }
+
+        const restore = btnLoading(btn, 'Generating…');
+        try {
+          const variants = await api('POST', '/generate', { headline, video_url: video });
+          renderQuickVariants(variants, video);
+        } catch (e) {
+          toast(e.message, 'error');
+        } finally {
+          restore();
+        }
+      });
+    });
+
+    function renderQuickVariants(variants, videoUrl) {
+      const wrap = document.getElementById('qc-variants');
+
+      wrap.innerHTML = `
+        <hr class="divider" />
+        <div style="margin-bottom:10px;display:flex;align-items:center;justify-content:space-between">
+          <span class="section-title">5 Variants</span>
+          <button class="btn btn-success btn-sm" id="qc-schedule-all">
+            Schedule All
+          </button>
+        </div>
+        <div class="variant-grid">
+          ${variants.map((v, i) => `
+            <div class="variant-card">
+              <div class="variant-header">
+                ${toneBadge(v.tone)}
+                <button class="btn btn-outline btn-sm" data-idx="${i}">Add to Queue</button>
+              </div>
+              <p style="font-size:13px;line-height:1.5;color:#333">${escHtml(v.text)}</p>
+            </div>
+          `).join('')}
+        </div>
+      `;
+
+      // Per-variant queue button
+      wrap.querySelectorAll('[data-idx]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const v = variants[+btn.dataset.idx];
+          const accounts = await api('GET', '/accounts').catch(() => []);
+          const active   = accounts.filter(a => a.is_active);
+          if (!active.length) { toast('No active accounts', 'error'); return; }
+          // Queue for first active account
+          const restore = btnLoading(btn, '…');
+          try {
+            await api('POST', '/queue', { account_id: active[0].id, tweet_text: v.text, video_url: videoUrl });
+            toast(`Queued (${v.tone})`, 'success');
+          } catch (e) {
+            toast(e.message, 'error');
+          } finally {
+            restore();
+          }
+        });
+      });
+
+      // Schedule all → bulk
+      document.getElementById('qc-schedule-all').addEventListener('click', async () => {
+        const accounts = await api('GET', '/accounts').catch(() => []);
+        const active   = accounts.filter(a => a.is_active);
+        if (!active.length) { toast('No active accounts', 'error'); return; }
+
+        // Match each variant to account by tone, or round-robin
+        const bulkVariants = variants.map((v, i) => {
+          const matched = active.find(a => a.tone === v.tone) || active[i % active.length];
+          return { account_id: matched.id, text: v.text };
+        });
+
+        const restoreBtn = btnLoading(document.getElementById('qc-schedule-all'), '…');
+        try {
+          const res = await api('POST', '/queue/bulk', { variants: bulkVariants, video_url: videoUrl });
+          toast(`${res.count} tweets queued`, 'success');
+        } catch (e) {
+          toast(e.message, 'error');
+        } finally {
+          restoreBtn();
+        }
+      });
+    }
+
+    // ── Utility ────────────────────────────────────────────────────────────
+
+    function escHtml(str) {
+      return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    // ── Boot ───────────────────────────────────────────────────────────────
+
+    document.addEventListener('DOMContentLoaded', () => {
+      loadStats();
+      loadAccounts();
+      loadTopics();
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Accounts — Tweet Engine</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <nav class="sidebar" id="sidebar"></nav>
+
+  <main class="main">
+    <div class="page-title">Accounts</div>
+
+    <div class="grid-2" style="align-items:start">
+
+      <!-- ── Left: Accounts list ── -->
+      <div class="section">
+        <div class="section-title" style="margin-bottom:14px">Connected Accounts</div>
+        <div class="card">
+          <div id="accounts-list">
+            <div class="empty-state">Loading…</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Right: Add account form ── -->
+      <div class="section">
+        <div class="section-title" style="margin-bottom:14px">Add Account</div>
+        <div class="card">
+          <form id="add-form" autocomplete="off">
+            <div class="form-group">
+              <label class="form-label">Username</label>
+              <input class="form-control" id="f-username" type="text"
+                placeholder="elonmusk" required />
+              <div class="form-hint">Without the @ symbol</div>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Tone</label>
+              <select class="form-control" id="f-tone" required>
+                <option value="">Select a tone…</option>
+                <option value="formal">Formal</option>
+                <option value="casual">Casual</option>
+                <option value="aggressive">Aggressive</option>
+                <option value="analytical">Analytical</option>
+                <option value="satirical">Satirical</option>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Persona Description</label>
+              <textarea class="form-control" id="f-persona" rows="2"
+                placeholder="Describe how this account should sound…"></textarea>
+            </div>
+
+            <hr class="divider" />
+            <div style="font-size:12px;font-weight:600;color:var(--gray);margin-bottom:14px;text-transform:uppercase;letter-spacing:0.5px">API Credentials</div>
+
+            <div class="form-group">
+              <label class="form-label">API Key (Consumer Key)</label>
+              <input class="form-control" id="f-api-key" type="password"
+                placeholder="••••••••" required />
+            </div>
+            <div class="form-group">
+              <label class="form-label">API Secret (Consumer Secret)</label>
+              <input class="form-control" id="f-api-secret" type="password"
+                placeholder="••••••••" required />
+            </div>
+            <div class="form-group">
+              <label class="form-label">Access Token</label>
+              <input class="form-control" id="f-access-token" type="password"
+                placeholder="••••••••" required />
+            </div>
+            <div class="form-group">
+              <label class="form-label">Access Secret</label>
+              <input class="form-control" id="f-access-secret" type="password"
+                placeholder="••••••••" required />
+            </div>
+
+            <div id="form-error" class="alert alert-error" style="display:none"></div>
+
+            <button type="submit" class="btn btn-primary" id="add-btn" style="width:100%">
+              Add Account
+            </button>
+          </form>
+        </div>
+      </div>
+
+    </div>
+  </main>
+
+  <script src="nav.js"></script>
+  <script>
+    // ── Load accounts list ─────────────────────────────────────────────────
+
+    async function loadAccounts() {
+      const wrap = document.getElementById('accounts-list');
+      try {
+        const accounts = await api('GET', '/accounts');
+        if (!accounts.length) {
+          wrap.innerHTML = `<div class="empty-state">No accounts yet. Add one →</div>`;
+          return;
+        }
+        wrap.innerHTML = accounts.map(a => `
+          <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)">
+            <span class="dot ${a.is_active ? 'dot-green' : 'dot-gray'}"></span>
+            <div style="flex:1;min-width:0">
+              <div style="font-weight:600;font-size:14px">@${escHtml(a.username)}</div>
+              <div style="font-size:11px;color:var(--gray);margin-top:2px">${escHtml(a.persona_description || '—')}</div>
+            </div>
+            ${toneBadge(a.tone)}
+            <div style="display:flex;gap:6px;flex-shrink:0">
+              <button class="btn btn-outline btn-sm" onclick="toggleAccount(${a.id}, this)">
+                ${a.is_active ? 'Pause' : 'Resume'}
+              </button>
+              <button class="btn btn-outline btn-sm" onclick="testPost(${a.id}, this)" title="Post a test tweet">
+                Test
+              </button>
+              <button class="btn btn-danger btn-sm" onclick="deleteAccount(${a.id}, this)">
+                Delete
+              </button>
+            </div>
+          </div>
+        `).join('') + `<div style="border-bottom:none"></div>`;
+
+        // Remove border from last item
+        const items = wrap.querySelectorAll('[style*="border-bottom"]');
+        if (items.length) items[items.length - 1].style.borderBottom = 'none';
+      } catch (e) {
+        wrap.innerHTML = `<div class="empty-state" style="color:var(--red)">${e.message}</div>`;
+      }
+    }
+
+    // ── Toggle active ──────────────────────────────────────────────────────
+
+    async function toggleAccount(id, btn) {
+      const restore = btnLoading(btn, '…');
+      try {
+        const res = await api('PATCH', `/accounts/${id}/toggle`);
+        toast(`@${res.username} ${res.is_active ? 'resumed' : 'paused'}`, 'success');
+        loadAccounts();
+      } catch (e) {
+        toast(e.message, 'error');
+        restore();
+      }
+    }
+
+    // ── Test post ──────────────────────────────────────────────────────────
+
+    async function testPost(id, btn) {
+      const text = prompt('Enter test tweet text:');
+      if (!text) return;
+      const restore = btnLoading(btn, '…');
+      try {
+        const res = await api('POST', `/accounts/test-post/${id}`, { text });
+        toast(`Posted! Tweet ID: ${res.tweet_id}`, 'success');
+      } catch (e) {
+        toast(`Failed: ${e.message}`, 'error');
+      } finally {
+        restore();
+      }
+    }
+
+    // ── Delete account ─────────────────────────────────────────────────────
+
+    async function deleteAccount(id, btn) {
+      if (!confirm('Delete this account? All queued and history data will also be removed.')) return;
+      const restore = btnLoading(btn, '…');
+      try {
+        await api('DELETE', `/accounts/${id}`);
+        toast('Account deleted', 'success');
+        loadAccounts();
+      } catch (e) {
+        toast(e.message, 'error');
+        restore();
+      }
+    }
+
+    // ── Add account form ───────────────────────────────────────────────────
+
+    document.addEventListener('DOMContentLoaded', () => {
+      loadAccounts();
+
+      document.getElementById('add-form').addEventListener('submit', async e => {
+        e.preventDefault();
+        const errBox = document.getElementById('form-error');
+        errBox.style.display = 'none';
+
+        const body = {
+          username:            document.getElementById('f-username').value.trim(),
+          tone:                document.getElementById('f-tone').value,
+          persona_description: document.getElementById('f-persona').value.trim(),
+          api_key:             document.getElementById('f-api-key').value.trim(),
+          api_secret:          document.getElementById('f-api-secret').value.trim(),
+          access_token:        document.getElementById('f-access-token').value.trim(),
+          access_secret:       document.getElementById('f-access-secret').value.trim(),
+        };
+
+        const btn = document.getElementById('add-btn');
+        const restore = btnLoading(btn, 'Adding…');
+        try {
+          await api('POST', '/accounts', body);
+          toast(`@${body.username} added`, 'success');
+          document.getElementById('add-form').reset();
+          loadAccounts();
+        } catch (e) {
+          errBox.textContent = e.message;
+          errBox.style.display = 'block';
+        } finally {
+          restore();
+        }
+      });
+    });
+
+    function escHtml(str) {
+      return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+  </script>
+</body>
+</html>
