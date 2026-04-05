@@ -3,7 +3,7 @@
  * Included on every page via <script src="nav.js">.
  */
 
-const API = 'http://localhost:8000';
+const API = window.location.origin;
 
 // ── SVG icons ─────────────────────────────────────────────────────────────
 
