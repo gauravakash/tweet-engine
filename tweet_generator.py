@@ -17,9 +17,26 @@ load_dotenv()
 
 router = APIRouter(prefix="/generate", tags=["Tweet Generator"])
 
-# Initialise the OpenAI client once at import time.
-# Raises an error at startup (not at request time) if the key is missing.
-_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+# Log key presence at import time so it shows up in Railway/uvicorn logs.
+_api_key = os.getenv("OPENAI_API_KEY")
+print(f"[tweet_generator] OpenAI key loaded: {bool(_api_key)}")
+
+# Defer client creation to first use so a missing key surfaces as a clear
+# 500 error on the /generate route rather than a silent import failure.
+_client: OpenAI | None = None
+
+
+def _get_client() -> OpenAI:
+    """Return (and lazily create) the shared OpenAI client."""
+    global _client
+    if _client is None:
+        key = os.getenv("OPENAI_API_KEY")
+        if not key:
+            raise ValueError(
+                "OPENAI_API_KEY is not set. Add it to your .env file or Railway environment variables."
+            )
+        _client = OpenAI(api_key=key)
+    return _client
 
 # ---------------------------------------------------------------------------
 # Tone definitions fed directly into the system prompt
@@ -115,7 +132,7 @@ Example structure (fill in real content):
   {{"tone": "satirical",  "text": "..."}}
 ]"""
 
-    response = _client.chat.completions.create(
+    response = _get_client().chat.completions.create(
         model="gpt-4o",
         messages=[
             {"role": "system", "content": system_prompt},
@@ -157,4 +174,7 @@ def generate(body: GenerateRequest):
     try:
         return generate_tweets(body.headline, body.video_url)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        # Some OpenAI exceptions store the message in .message rather than str()
+        msg = getattr(exc, "message", None) or str(exc) or type(exc).__name__
+        print(f"[tweet_generator] OpenAI error: {exc!r}")
+        raise HTTPException(status_code=500, detail=msg) from exc
