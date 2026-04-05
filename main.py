@@ -122,13 +122,23 @@ def save_openai_key(body: OpenAIKeyBody):
 
 
 # ---------------------------------------------------------------------------
-# Health check
+# Health check + model info
 # ---------------------------------------------------------------------------
 
 @app.get("/health")
 def health_check():
     """Liveness probe for Railway."""
     return {"status": "Tweet Engine running"}
+
+
+@app.get("/model-info")
+def model_info():
+    """Return the currently configured LLM. Change OPENAI_MODEL to switch models."""
+    return {
+        "model":     os.getenv("OPENAI_MODEL", "gpt-4o"),
+        "provider":  "OpenAI via LangChain",
+        "framework": "LangChain LCEL",
+    }
 
 
 # ---------------------------------------------------------------------------

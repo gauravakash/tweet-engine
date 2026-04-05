@@ -23,8 +23,9 @@
 - [x] `database.py` — SQLite schema: `accounts`, `tweet_queue`, `post_history`, `news_topics`
 - [x] `main.py` — FastAPI app, CORS (env-configurable), DB init, scheduler start/stop, settings endpoints, frontend served at `/`
 - [x] `news_topics.py` — `POST /topics`, `GET /topics`, `DELETE /topics/{id}`
-- [x] `tweet_generator.py` — `POST /generate` → 5 tone variants via GPT-4o
-- [x] `accounts.py` — account CRUD + `POST /accounts/test-post/{id}`; secrets never returned
+- [x] `llm_config.py` — LangChain `get_llm()` factory; model set via `OPENAI_MODEL` env var ✅
+- [x] `tweet_generator.py` — refactored to LangChain LCEL (`prompt | llm | JsonOutputParser`); async; model-agnostic ✅
+- [x] `accounts.py` — account CRUD + `POST /accounts/test-post/{id}`; secrets never returned; Excel/CSV bulk import ✅
 - [x] `poster.py` — Tweepy posting, `post_history` logging, `GET /history`
 - [x] `scheduler.py` — APScheduler (60 min), `add_to_queue()`, `add_bulk_to_queue()`, queue CRUD at `/queue`
 - [x] `frontend/style.css` — shared stylesheet (CSS variables, all components)
@@ -41,6 +42,7 @@
 - [x] `runtime.txt` — Python 3.11.0
 - [x] `.env.example` — all required env variables documented
 - [x] `README.md` — setup, deploy, and project structure docs
+- [x] `llm_config.py` + `tweet_generator.py` refactored to LangChain LCEL — model-agnostic (change `OPENAI_MODEL` env var to swap models, no code changes needed)
 
 ---
 

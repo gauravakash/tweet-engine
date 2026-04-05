@@ -10,9 +10,16 @@ Endpoints:
     PATCH  /accounts/{id}/toggle      — flip is_active on/off
     DELETE /accounts/{id}             — remove account
     POST   /accounts/test-post/{id}   — post a test tweet from this account
+    GET    /accounts/import/template  — download sample Excel template
+    POST   /accounts/import           — bulk import from .xlsx or .csv
 """
 
-from fastapi import APIRouter, HTTPException
+import io
+
+import pandas as pd
+import openpyxl
+from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from database import get_connection
@@ -164,3 +171,192 @@ def test_post(account_id: int, body: TestPostBody):
     if not result["success"]:
         raise HTTPException(status_code=502, detail=result["error"])
     return result
+
+
+# ---------------------------------------------------------------------------
+# Bulk import — template download
+# ---------------------------------------------------------------------------
+
+# All columns the import endpoint expects (in display order)
+IMPORT_COLUMNS = [
+    "username",
+    "tone",
+    "persona_description",
+    "api_key",
+    "api_secret",
+    "access_token",
+    "access_secret",
+]
+
+VALID_TONES = {"formal", "casual", "aggressive", "analytical", "satirical"}
+
+
+@router.get("/import/template")
+def download_import_template():
+    """
+    Generate and return a sample .xlsx file with one header row and one
+    example row so users know exactly what format to submit.
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Accounts"
+
+    # Header row
+    ws.append(IMPORT_COLUMNS)
+
+    # One example row — clearly placeholder values so nobody submits it by accident
+    ws.append([
+        "exampleuser",
+        "formal",
+        "Professional diplomatic tone",
+        "your_api_key_here",
+        "your_api_secret_here",
+        "your_access_token_here",
+        "your_access_secret_here",
+    ])
+
+    # Style header cells bold
+    from openpyxl.styles import Font
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+
+    # Set sensible column widths
+    widths = [18, 12, 30, 28, 28, 28, 28]
+    for col_idx, width in enumerate(widths, start=1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = width
+
+    # Write to an in-memory buffer and stream back
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": 'attachment; filename="tweet_engine_accounts_template.xlsx"'
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bulk import — file upload
+# ---------------------------------------------------------------------------
+
+@router.post("/import")
+async def import_accounts(file: UploadFile = File(...)):
+    """
+    Accept a .xlsx or .csv file and bulk-insert valid account rows.
+
+    Rules:
+    - Required columns (case-insensitive): username, tone, persona_description,
+      api_key, api_secret, access_token, access_secret
+    - tone must be one of the five valid values (case-insensitive, stripped)
+    - Rows with any empty required field are skipped
+    - Rows whose username already exists in the DB are skipped
+    - Returns a summary: {imported, skipped, errors}
+    """
+    filename = file.filename or ""
+    if not (filename.endswith(".xlsx") or filename.endswith(".csv")):
+        raise HTTPException(
+            status_code=422,
+            detail="Only .xlsx and .csv files are accepted",
+        )
+
+    content = await file.read()
+    buf = io.BytesIO(content)
+
+    # ── Parse file into a DataFrame ──────────────────────────────────────────
+    try:
+        if filename.endswith(".xlsx"):
+            df = pd.read_excel(buf, engine="openpyxl")
+        else:
+            df = pd.read_csv(buf)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Could not parse file: {exc}") from exc
+
+    # Normalise column names to lowercase + stripped
+    df.columns = [str(c).strip().lower() for c in df.columns]
+
+    # Verify all required columns are present
+    missing = [col for col in IMPORT_COLUMNS if col not in df.columns]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Missing required columns: {', '.join(missing)}",
+        )
+
+    # ── Fetch existing usernames to detect duplicates ────────────────────────
+    conn = get_connection()
+    try:
+        existing = {
+            row["username"]
+            for row in conn.execute("SELECT username FROM accounts").fetchall()
+        }
+    finally:
+        conn.close()
+
+    # ── Process rows ─────────────────────────────────────────────────────────
+    imported = 0
+    skipped  = 0
+    errors: list[str] = []
+
+    for raw_idx, row in df.iterrows():
+        row_num = int(raw_idx) + 2  # +2: 1-based + header row
+
+        # Extract and clean each field
+        values = {col: str(row[col]).strip() if pd.notna(row[col]) else "" for col in IMPORT_COLUMNS}
+
+        # Skip rows where any required field is empty
+        empty_fields = [col for col, val in values.items() if not val]
+        if empty_fields:
+            skipped += 1
+            errors.append(f"row {row_num}: empty fields ({', '.join(empty_fields)}) — skipped")
+            continue
+
+        # Validate and normalise tone
+        tone = values["tone"].lower()
+        if tone not in VALID_TONES:
+            skipped += 1
+            errors.append(
+                f"row {row_num}: invalid tone '{values['tone']}' "
+                f"(must be one of: {', '.join(sorted(VALID_TONES))}) — skipped"
+            )
+            continue
+
+        # Skip duplicate usernames
+        username = values["username"]
+        if username in existing:
+            skipped += 1
+            errors.append(f"row {row_num}: username '{username}' already exists — skipped")
+            continue
+
+        # Insert the row
+        try:
+            conn = get_connection()
+            conn.execute(
+                """
+                INSERT INTO accounts
+                    (username, tone, persona_description,
+                     api_key, api_secret, access_token, access_secret)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    username,
+                    tone,
+                    values["persona_description"],
+                    values["api_key"],
+                    values["api_secret"],
+                    values["access_token"],
+                    values["access_secret"],
+                ),
+            )
+            conn.commit()
+            conn.close()
+            existing.add(username)  # prevent duplicate within the same file
+            imported += 1
+        except Exception as exc:
+            skipped += 1
+            errors.append(f"row {row_num}: DB error — {exc}")
+
+    return {"imported": imported, "skipped": skipped, "errors": errors}

@@ -57,6 +57,28 @@
         <div id="run-result" style="display:none" class="alert alert-info"></div>
       </div>
 
+      <!-- ── Model Info ── -->
+      <div class="card">
+        <div class="section-title" style="margin-bottom:16px">AI Model</div>
+        <table style="font-size:13px" id="model-info-table">
+          <tr>
+            <td style="padding:8px 0;color:var(--gray);width:140px;border:none">Model</td>
+            <td style="padding:8px 0;border:none;font-weight:500" id="mi-model">Loading…</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;color:var(--gray);border:none">Provider</td>
+            <td style="padding:8px 0;border:none;font-weight:500" id="mi-provider">—</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;color:var(--gray);border:none">Framework</td>
+            <td style="padding:8px 0;border:none;font-weight:500" id="mi-framework">—</td>
+          </tr>
+        </table>
+        <div class="form-hint" style="margin-top:8px">
+          To switch models, set <code>OPENAI_MODEL</code> in your Railway environment variables.
+        </div>
+      </div>
+
       <!-- ── About ── -->
       <div class="card">
         <div class="section-title" style="margin-bottom:16px">About</div>
@@ -170,12 +192,22 @@
 
       // ── API status ping ──────────────────────────────────────────────────
 
-      api('GET', '/').then(res => {
+      api('GET', '/health').then(res => {
         document.getElementById('api-status').innerHTML =
           `<span style="color:var(--green)">✓ ${res.status}</span>`;
       }).catch(() => {
         document.getElementById('api-status').innerHTML =
           `<span style="color:var(--red)">✗ Offline</span>`;
+      });
+
+      // ── Model info ───────────────────────────────────────────────────────
+
+      api('GET', '/model-info').then(res => {
+        document.getElementById('mi-model').textContent     = res.model;
+        document.getElementById('mi-provider').textContent  = res.provider;
+        document.getElementById('mi-framework').textContent = res.framework;
+      }).catch(() => {
+        document.getElementById('mi-model').textContent = 'Unavailable';
       });
     });
   </script>

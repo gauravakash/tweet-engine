@@ -1,69 +1,155 @@
 """
-tweet_generator.py — OpenAI GPT-4o integration for tweet generation.
+tweet_generator.py — LangChain LCEL tweet generation pipeline.
 
 Endpoint:
     POST /generate  — returns 5 tone-variant tweets for a given headline
+
+Architecture:
+    prompt | llm | JsonOutputParser
+
+Swapping the model requires only changing OPENAI_MODEL in the environment —
+no code changes needed anywhere in this file.
 """
 
-import json
 import os
+from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException
-from openai import OpenAI
+from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel
+
+from llm_config import get_llm
 
 load_dotenv()
 
 router = APIRouter(prefix="/generate", tags=["Tweet Generator"])
 
-# Log key presence at import time so it shows up in Railway/uvicorn logs.
-_api_key = os.getenv("OPENAI_API_KEY")
-print(f"[tweet_generator] OpenAI key loaded: {bool(_api_key)}")
+print(f"[tweet_generator] OpenAI key loaded: {bool(os.getenv('OPENAI_API_KEY'))}")
 
-# Defer client creation to first use so a missing key surfaces as a clear
-# 500 error on the /generate route rather than a silent import failure.
-_client: OpenAI | None = None
-
-
-def _get_client() -> OpenAI:
-    """Return (and lazily create) the shared OpenAI client."""
-    global _client
-    if _client is None:
-        key = os.getenv("OPENAI_API_KEY")
-        if not key:
-            raise ValueError(
-                "OPENAI_API_KEY is not set. Add it to your .env file or Railway environment variables."
-            )
-        _client = OpenAI(api_key=key)
-    return _client
 
 # ---------------------------------------------------------------------------
-# Tone definitions fed directly into the system prompt
+# Prompt template
 # ---------------------------------------------------------------------------
 
-TONES: list[dict] = [
-    {
-        "name": "formal",
-        "description": "diplomatic, factual, professional — no emojis",
-    },
-    {
-        "name": "casual",
-        "description": "conversational, relatable, easy language — emojis allowed",
-    },
-    {
-        "name": "aggressive",
-        "description": "hard opinions, punchy, bold statements — no emojis",
-    },
-    {
-        "name": "analytical",
-        "description": "data-driven, thread-style, insightful — no emojis",
-    },
-    {
-        "name": "satirical",
-        "description": "witty, sarcastic, humorous — emojis allowed",
-    },
-]
+SYSTEM_PROMPT = """You are a professional social media manager specializing in \
+geopolitical and current-events content.
+
+Generate exactly 5 tweet variants for the given headline.
+Each variant must have a different tone:
+1. formal     — diplomatic, factual, professional — no emojis
+2. casual     — conversational, relatable, easy language — emojis allowed
+3. aggressive — hard opinions, punchy, bold statements — no emojis
+4. analytical — data-driven, thread-style, insightful — no emojis
+5. satirical  — witty, sarcastic, humorous — emojis allowed
+
+Rules:
+- Each tweet must be ≤ {char_budget} characters (excluding any video URL).
+- Include 2-3 relevant SEO hashtags in every tweet.
+- No emojis in formal, aggressive, or analytical tweets.
+- Do NOT include a video URL in the tweet text — it will be appended separately.
+- Return ONLY valid JSON, no markdown, no explanation.
+
+Output format:
+{{
+  "tweets": [
+    {{"tone": "formal",     "text": "..."}},
+    {{"tone": "casual",     "text": "..."}},
+    {{"tone": "aggressive", "text": "..."}},
+    {{"tone": "analytical", "text": "..."}},
+    {{"tone": "satirical",  "text": "..."}}
+  ]
+}}"""
+
+_prompt = ChatPromptTemplate.from_messages([
+    ("system", SYSTEM_PROMPT),
+    ("human", "Headline: {headline}\n\nGenerate the 5 tone-variant tweets now."),
+])
+
+# ---------------------------------------------------------------------------
+# LCEL chain — lazily built on first call so startup doesn't fail if no key
+# ---------------------------------------------------------------------------
+
+_chain = None
+
+
+def _get_chain():
+    """Build (and cache) the LCEL chain: prompt | llm | parser."""
+    global _chain
+    if _chain is None:
+        _chain = _prompt | get_llm(temperature=0.8) | JsonOutputParser()
+    return _chain
+
+
+# ---------------------------------------------------------------------------
+# Core generation function
+# ---------------------------------------------------------------------------
+
+EXPECTED_TONES = {"formal", "casual", "aggressive", "analytical", "satirical"}
+
+
+async def generate_tweets(
+    headline: str,
+    video_url: Optional[str] = None,
+) -> list[dict]:
+    """
+    Invoke the LangChain chain to produce 5 tone-variant tweets.
+
+    Args:
+        headline:  The news headline or topic to tweet about.
+        video_url: Optional URL appended to each tweet after generation.
+
+    Returns:
+        List of {"tone": str, "text": str} dicts, one per tone.
+    """
+    # Calculate char budget so the model leaves room for the appended URL
+    url_suffix = f" {video_url}" if video_url else ""
+    char_budget = 240 - len(url_suffix)
+
+    try:
+        result = await _get_chain().ainvoke({
+            "headline": headline,
+            "char_budget": char_budget,
+        })
+    except Exception as exc:
+        print(f"[tweet_generator] LangChain error: {exc!r}")
+        msg = getattr(exc, "message", None) or str(exc) or type(exc).__name__
+        raise HTTPException(status_code=500, detail=f"Tweet generation failed: {msg}") from exc
+
+    # Normalise output — handle {"tweets": [...]} and bare [...]
+    if isinstance(result, list):
+        tweets = result
+    elif isinstance(result, dict):
+        # Accept any key whose value is a list (e.g. "tweets", "variants")
+        tweets = next((v for v in result.values() if isinstance(v, list)), [])
+    else:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected LLM output type: {type(result).__name__}",
+        )
+
+    # Validate all 5 tones are present
+    got_tones = {t.get("tone", "").lower() for t in tweets}
+    missing = EXPECTED_TONES - got_tones
+    if missing:
+        raise HTTPException(
+            status_code=500,
+            detail=f"LLM response missing tones: {', '.join(sorted(missing))}",
+        )
+
+    # Enforce hard 240-char limit and append video URL
+    output = []
+    for tweet in tweets:
+        text = tweet.get("text", "").strip()
+        # Trim to char_budget before appending the URL
+        if len(text) > char_budget:
+            text = text[:char_budget - 3] + "..."
+        if video_url:
+            text = f"{text}{url_suffix}"
+        output.append({"tone": tweet["tone"].lower(), "text": text})
+
+    return output
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +158,7 @@ TONES: list[dict] = [
 
 class GenerateRequest(BaseModel):
     headline: str
-    video_url: str | None = None
+    video_url: Optional[str] = None
 
 
 class TweetVariant(BaseModel):
@@ -81,100 +167,12 @@ class TweetVariant(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Core generation function (reusable outside the router)
-# ---------------------------------------------------------------------------
-
-def generate_tweets(headline: str, video_url: str | None = None) -> list[dict]:
-    """
-    Call GPT-4o to produce 5 tone-variant tweets for *headline*.
-
-    If *video_url* is provided it is appended to each tweet after generation,
-    and the character budget is reduced accordingly so tweets stay ≤ 240 chars.
-    """
-    # Reserve space for " <url>" when a video URL is supplied
-    url_suffix = f" {video_url}" if video_url else ""
-    char_budget = 240 - len(url_suffix)
-
-    tone_list = "\n".join(
-        f'{i+1}. {t["name"].capitalize()} — {t["description"]}'
-        for i, t in enumerate(TONES)
-    )
-
-    system_prompt = (
-        "You are an expert social-media copywriter specialising in X (Twitter). "
-        "Your output must be ONLY a valid JSON array — no markdown, no prose."
-    )
-
-    user_prompt = f"""Write exactly 5 tweets about the following headline, one per tone.
-
-Headline: {headline}
-
-Tones (write in this exact order):
-{tone_list}
-
-Rules:
-- Each tweet must be ≤ {char_budget} characters (not counting the video URL below).
-- Include 2-3 relevant SEO hashtags in every tweet.
-- No emojis in formal, aggressive, or analytical tweets.
-- Emojis are allowed in casual and satirical tweets.
-- Do NOT include a video URL in the text — it will be appended automatically.
-
-Return a JSON array with exactly 5 objects, each having two keys:
-  "tone"  — one of: formal, casual, aggressive, analytical, satirical
-  "text"  — the tweet body
-
-Example structure (fill in real content):
-[
-  {{"tone": "formal",     "text": "..."}},
-  {{"tone": "casual",     "text": "..."}},
-  {{"tone": "aggressive", "text": "..."}},
-  {{"tone": "analytical", "text": "..."}},
-  {{"tone": "satirical",  "text": "..."}}
-]"""
-
-    response = _get_client().chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_prompt},
-        ],
-        temperature=0.8,
-        response_format={"type": "json_object"},  # guarantees valid JSON back
-    )
-
-    raw = response.choices[0].message.content
-
-    # GPT-4o with response_format=json_object may wrap the array in an object.
-    # Handle both {"tweets": [...]} and a bare [...].
-    parsed = json.loads(raw)
-    if isinstance(parsed, dict):
-        # Pull the first list value regardless of key name
-        variants = next(v for v in parsed.values() if isinstance(v, list))
-    else:
-        variants = parsed
-
-    # Validate structure and append video URL when provided
-    result = []
-    for item in variants:
-        text = item["text"].strip()
-        if video_url:
-            text = f"{text} {video_url}"
-        result.append({"tone": item["tone"], "text": text})
-
-    return result
-
-
-# ---------------------------------------------------------------------------
 # Route
 # ---------------------------------------------------------------------------
 
 @router.post("", response_model=list[TweetVariant])
-def generate(body: GenerateRequest):
-    """Generate 5 tone-variant tweets from a headline."""
-    try:
-        return generate_tweets(body.headline, body.video_url)
-    except Exception as exc:
-        # Some OpenAI exceptions store the message in .message rather than str()
-        msg = getattr(exc, "message", None) or str(exc) or type(exc).__name__
-        print(f"[tweet_generator] OpenAI error: {exc!r}")
-        raise HTTPException(status_code=500, detail=msg) from exc
+async def generate(body: GenerateRequest):
+    """Generate 5 tone-variant tweets from a headline via LangChain."""
+    if not body.headline.strip():
+        raise HTTPException(status_code=400, detail="Headline cannot be empty")
+    return await generate_tweets(body.headline, body.video_url)

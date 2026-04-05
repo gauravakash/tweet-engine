@@ -24,9 +24,53 @@
         </div>
       </div>
 
-      <!-- ── Right: Add account form ── -->
-      <div class="section">
-        <div class="section-title" style="margin-bottom:14px">Add Account</div>
+      <!-- ── Right: Import + Add ── -->
+      <div>
+
+        <!-- Bulk import section -->
+        <div class="section">
+          <div class="section-title" style="margin-bottom:14px">Bulk Import via Excel/CSV</div>
+          <div class="card">
+
+            <!-- Template download -->
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+              <div>
+                <div style="font-weight:600;font-size:13px">Download Template</div>
+                <div class="form-hint" style="margin-top:2px">Fill it in and upload below</div>
+              </div>
+              <a href="/accounts/import/template" download
+                class="btn btn-outline btn-sm">
+                ↓ Excel Template
+              </a>
+            </div>
+
+            <hr class="divider" style="margin:0 0 16px" />
+
+            <!-- File upload -->
+            <div class="form-group" style="margin-bottom:12px">
+              <label class="form-label">Upload File (.xlsx or .csv)</label>
+              <input class="form-control" id="import-file" type="file"
+                accept=".xlsx,.csv" style="padding:6px 12px" />
+            </div>
+
+            <div id="import-error" class="alert alert-error" style="display:none"></div>
+            <div id="import-result" class="alert alert-info" style="display:none"></div>
+
+            <!-- Errors list (per-row detail) -->
+            <div id="import-errors-list" style="display:none;margin-bottom:12px">
+              <div style="font-size:12px;font-weight:600;color:var(--red);margin-bottom:6px">Row errors:</div>
+              <ul id="import-errors-ul" style="font-size:12px;color:var(--red);padding-left:18px;line-height:1.8"></ul>
+            </div>
+
+            <button class="btn btn-primary" id="import-btn" style="width:100%">
+              Import Accounts
+            </button>
+          </div>
+        </div>
+
+        <!-- Add account form -->
+        <div class="section">
+          <div class="section-title" style="margin-bottom:14px">Add Account</div>
         <div class="card">
           <form id="add-form" autocomplete="off">
             <div class="form-group">
@@ -85,7 +129,8 @@
             </button>
           </form>
         </div>
-      </div>
+      </div><!-- end Add Account section -->
+      </div><!-- end right column -->
 
     </div>
   </main>
@@ -207,6 +252,71 @@
         } catch (e) {
           errBox.textContent = e.message;
           errBox.style.display = 'block';
+        } finally {
+          restore();
+        }
+      });
+    });
+
+    // ── Bulk import ────────────────────────────────────────────────────────
+
+    document.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('import-btn').addEventListener('click', async () => {
+        const fileInput  = document.getElementById('import-file');
+        const resultBox  = document.getElementById('import-result');
+        const errorBox   = document.getElementById('import-error');
+        const errorsList = document.getElementById('import-errors-list');
+        const errorsUl   = document.getElementById('import-errors-ul');
+
+        // Reset state
+        resultBox.style.display  = 'none';
+        errorBox.style.display   = 'none';
+        errorsList.style.display = 'none';
+
+        if (!fileInput.files.length) {
+          errorBox.textContent = 'Select a .xlsx or .csv file first';
+          errorBox.style.display = 'block';
+          return;
+        }
+
+        const file    = fileInput.files[0];
+        const formData = new FormData();
+        formData.append('file', file);
+
+        const btn = document.getElementById('import-btn');
+        const restore = btnLoading(btn, 'Importing…');
+
+        try {
+          // Use raw fetch — api() sends JSON, but this needs multipart
+          const res = await fetch(API + '/accounts/import', {
+            method: 'POST',
+            body: formData,
+          });
+          const data = await res.json().catch(() => ({ detail: res.statusText }));
+          if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+
+          // Show summary
+          const { imported, skipped, errors } = data;
+          resultBox.textContent = `${imported} imported, ${skipped} skipped`;
+          resultBox.style.display = 'block';
+
+          if (imported > 0) toast(`${imported} account(s) imported`, 'success');
+
+          // Show per-row errors if any
+          if (errors && errors.length) {
+            errorsUl.innerHTML = errors.map(e => `<li>${escHtml(e)}</li>`).join('');
+            errorsList.style.display = 'block';
+          }
+
+          // Refresh accounts list if anything was imported
+          if (imported > 0) {
+            fileInput.value = '';
+            loadAccounts();
+          }
+        } catch (e) {
+          errorBox.textContent = e.message;
+          errorBox.style.display = 'block';
+          toast(e.message, 'error');
         } finally {
           restore();
         }
