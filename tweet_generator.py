@@ -17,9 +17,30 @@ load_dotenv()
 
 router = APIRouter(prefix="/generate", tags=["Tweet Generator"])
 
-# Initialise the OpenAI client once at import time.
-# Raises an error at startup (not at request time) if the key is missing.
-_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+# ---------------------------------------------------------------------------
+# Lazy OpenAI client initialisation
+# ---------------------------------------------------------------------------
+
+_client: OpenAI | None = None
+
+
+def _get_client() -> OpenAI:
+    """Return the shared OpenAI client, creating it on first call.
+
+    Defers key lookup until the client is actually needed so the service
+    can start and serve health checks even when OPENAI_API_KEY is not yet
+    configured.
+    """
+    global _client
+    if _client is None:
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "OPENAI_API_KEY environment variable is not set. "
+                "Configure it before making generation requests."
+            )
+        _client = OpenAI(api_key=api_key)
+    return _client
 
 # ---------------------------------------------------------------------------
 # Tone definitions fed directly into the system prompt
@@ -115,7 +136,7 @@ Example structure (fill in real content):
   {{"tone": "satirical",  "text": "..."}}
 ]"""
 
-    response = _client.chat.completions.create(
+    response = _get_client().chat.completions.create(
         model="gpt-4o",
         messages=[
             {"role": "system", "content": system_prompt},
