@@ -322,23 +322,26 @@ async def import_accounts(file: UploadFile = File(...)):
 @router.post("/test-post/{account_id}")
 def test_post(account_id: int, body: TestPostBody):
     """Post a test tweet from a specific account."""
-    # Import here to avoid a circular import (poster imports from accounts indirectly)
-    from poster import post_tweet
+    try:
+        from poster import post_tweet
+    except Exception as import_err:
+        print(f"[accounts] Failed to import poster: {type(import_err).__name__}: {import_err}")
+        raise HTTPException(status_code=500, detail=f"Import error: {import_err}")
 
     try:
         result = post_tweet(account_id, body.text)
         if not result["success"]:
             error_msg = result.get("error") or "Tweet posting failed (unknown error)"
-            print(f"[accounts] Test post error for account {account_id}: {error_msg}")
+            print(f"[accounts] Test post failed for account {account_id}: {error_msg}")
             raise HTTPException(status_code=502, detail=error_msg)
         return result
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[accounts] Test post error for account {account_id}: {e}")
+        print(f"[accounts] Unexpected error in test_post for account {account_id}: {type(e).__name__}: {e}")
         raise HTTPException(
             status_code=500,
-            detail=getattr(e, "message", None) or str(e) or type(e).__name__,
+            detail=str(e) or type(e).__name__,
         )
 
 

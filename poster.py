@@ -49,6 +49,15 @@ def get_tweepy_client(account_id: int) -> tweepy.Client:
     if not row["is_active"]:
         raise ValueError(f"Account '{row['username']}' (id={account_id}) is inactive")
 
+    # Log credential presence (never log actual values)
+    print(
+        f"[poster] Building Tweepy client for account {account_id} (@{row['username']}) — "
+        f"api_key={'set' if row['api_key'] else 'MISSING'}, "
+        f"api_secret={'set' if row['api_secret'] else 'MISSING'}, "
+        f"access_token={'set' if row['access_token'] else 'MISSING'}, "
+        f"access_secret={'set' if row['access_secret'] else 'MISSING'}"
+    )
+
     return tweepy.Client(
         consumer_key=row["api_key"],
         consumer_secret=row["api_secret"],
@@ -92,7 +101,17 @@ def post_tweet(
         tweet_id = str(response.data["id"])
         success = True
     except Exception as exc:
-        error_msg = str(exc)
+        print(f"[poster] Test post error: {type(exc).__name__}: {exc}")
+        # Tweepy errors sometimes have empty str() — try multiple sources
+        error_msg = (
+            getattr(exc, "api_messages", None)
+            or getattr(exc, "reason", None)
+            or str(exc)
+            or type(exc).__name__
+        )
+        # api_messages is a list on Tweepy errors — flatten to string
+        if isinstance(error_msg, list):
+            error_msg = "; ".join(str(m) for m in error_msg) or type(exc).__name__
 
     # ------------------------------------------------------------------
     # Log result to post_history regardless of outcome
