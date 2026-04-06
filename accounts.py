@@ -125,54 +125,6 @@ def list_accounts():
         conn.close()
 
 
-@router.patch("/{account_id}/toggle", response_model=ToggleResponse)
-def toggle_active(account_id: int):
-    """Flip is_active between 1 (active) and 0 (paused) for an account."""
-    conn = get_connection()
-    try:
-        result = conn.execute(
-            "UPDATE accounts SET is_active = 1 - is_active WHERE id = ?",
-            (account_id,),
-        )
-        conn.commit()
-        if result.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Account not found")
-        row = conn.execute(
-            "SELECT id, username, is_active FROM accounts WHERE id = ?",
-            (account_id,),
-        ).fetchone()
-        return dict(row)
-    finally:
-        conn.close()
-
-
-@router.delete("/{account_id}", status_code=204)
-def delete_account(account_id: int):
-    """Delete an account (cascades to tweet_queue and post_history)."""
-    conn = get_connection()
-    try:
-        result = conn.execute(
-            "DELETE FROM accounts WHERE id = ?", (account_id,)
-        )
-        conn.commit()
-        if result.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Account not found")
-    finally:
-        conn.close()
-
-
-@router.post("/test-post/{account_id}")
-def test_post(account_id: int, body: TestPostBody):
-    """Post a test tweet from a specific account."""
-    # Import here to avoid a circular import (poster imports from accounts indirectly)
-    from poster import post_tweet
-
-    result = post_tweet(account_id, body.text)
-    if not result["success"]:
-        raise HTTPException(status_code=502, detail=result["error"])
-    return result
-
-
 # ---------------------------------------------------------------------------
 # Bulk import — template download
 # ---------------------------------------------------------------------------
@@ -360,3 +312,67 @@ async def import_accounts(file: UploadFile = File(...)):
             errors.append(f"row {row_num}: DB error — {exc}")
 
     return {"imported": imported, "skipped": skipped, "errors": errors}
+
+
+# ---------------------------------------------------------------------------
+# Parameterised routes — registered AFTER all literal paths so FastAPI
+# doesn't accidentally shadow /import/template with /{account_id}
+# ---------------------------------------------------------------------------
+
+@router.post("/test-post/{account_id}")
+def test_post(account_id: int, body: TestPostBody):
+    """Post a test tweet from a specific account."""
+    # Import here to avoid a circular import (poster imports from accounts indirectly)
+    from poster import post_tweet
+
+    try:
+        result = post_tweet(account_id, body.text)
+        if not result["success"]:
+            error_msg = result.get("error") or "Tweet posting failed (unknown error)"
+            print(f"[accounts] Test post error for account {account_id}: {error_msg}")
+            raise HTTPException(status_code=502, detail=error_msg)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[accounts] Test post error for account {account_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=getattr(e, "message", None) or str(e) or type(e).__name__,
+        )
+
+
+@router.patch("/{account_id}/toggle", response_model=ToggleResponse)
+def toggle_active(account_id: int):
+    """Flip is_active between 1 (active) and 0 (paused) for an account."""
+    conn = get_connection()
+    try:
+        result = conn.execute(
+            "UPDATE accounts SET is_active = 1 - is_active WHERE id = ?",
+            (account_id,),
+        )
+        conn.commit()
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Account not found")
+        row = conn.execute(
+            "SELECT id, username, is_active FROM accounts WHERE id = ?",
+            (account_id,),
+        ).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+
+@router.delete("/{account_id}", status_code=204)
+def delete_account(account_id: int):
+    """Delete an account (cascades to tweet_queue and post_history)."""
+    conn = get_connection()
+    try:
+        result = conn.execute(
+            "DELETE FROM accounts WHERE id = ?", (account_id,)
+        )
+        conn.commit()
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Account not found")
+    finally:
+        conn.close()
