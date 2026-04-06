@@ -97,7 +97,9 @@ def post_tweet(
 
     try:
         client = get_tweepy_client(account_id)
-        response = client.create_tweet(text=final_text)
+        # user_auth=True forces OAuth 1.0a (consumer key + access token).
+        # The default (False) uses App-Only Bearer Token, which cannot post tweets.
+        response = client.create_tweet(text=final_text, user_auth=True)
         tweet_id = str(response.data["id"])
         success = True
     except Exception as exc:
